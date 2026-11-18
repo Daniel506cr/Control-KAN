@@ -129,6 +129,12 @@ tbody tr+tr td{border-top:1px solid var(--line)}
 .tag{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:10px;font-weight:800}
 .tag.K{background:var(--k-soft);color:var(--k)} .tag.A{background:var(--a-soft);color:var(--a)} .tag.N{background:var(--n-soft);color:var(--n)}
 .empty{color:var(--muted);padding:22px;background:var(--surface);border-radius:20px;text-align:center}
+section.people{margin-top:44px}
+.people .day h3 small{font-weight:500;color:var(--muted);font-size:.85rem}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;background:var(--track);vertical-align:middle}
+.dot.on{background:var(--n);box-shadow:0 0 0 3px var(--n-soft)}
+.who-name{font-weight:600}
+.who-mail{color:var(--muted);font-size:.85rem}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
 .role{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:.8rem;font-weight:700;padding:4px 10px;border-radius:999px;background:var(--surface);color:var(--muted);box-shadow:var(--shadow)}
@@ -165,6 +171,16 @@ body:not(.is-admin) .admin-only{display:none!important}
   <div class="banner" id="banner" hidden></div>
   <div class="row3" id="grid"></div>
 
+  <section class="people admin-only">
+    <div class="logtop">
+      <div>
+        <h2>Personas</h2>
+        <div class="sync">Solo visible para administradores · en línea = activo en los últimos 2 minutos</div>
+      </div>
+    </div>
+    <div id="people"></div>
+  </section>
+
   <section class="log">
     <div class="logtop">
       <div>
@@ -194,7 +210,7 @@ const ADMIN_EMAILS = ["proyectocr3d@gmail.com"];
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, doc, addDoc, setDoc, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, addDoc, setDoc, getDoc, updateDoc, onSnapshot, query, where, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const LETTERS = ['K','A','N'];
 const GOAL = 10;
@@ -206,6 +222,8 @@ let events = [];
 let control = {resets:{}, clearedBefore:0, hiddenDays:[]};
 let derived = {people:{}, hist:{}};
 let db = null, auth = null, unsubEvents = null, subscribedCb = null;
+let people = [], unsubPeople = null, beatTimer = null;
+const ONLINE_MS = 150000;
 
 /* utilidades */
 const pad = n => String(n).padStart(2,'0');
@@ -250,7 +268,7 @@ function derive(){
   }
   derived = {people, hist};
 }
-function update(){ derive(); render(); }
+function update(){ derive(); render(); if(isAdmin) renderPeople(); }
 
 /* acciones */
 function ready(){
@@ -340,6 +358,75 @@ function subscribeEvents(){
   }, () => { mode = 'offline'; setRole(); update(); });
 }
 
+/* presencia: cada persona registra su última conexión */
+async function heartbeat(){
+  if(!user || !db) return;
+  const ref = doc(db,'usuarios',user.uid);
+  const base = {email:user.email || '', name:user.displayName || '', lastSeen:serverTimestamp()};
+  try{
+    const s = await getDoc(ref);
+    if(s.exists()) await updateDoc(ref, base);
+    else await setDoc(ref, {...base, firstSeen:serverTimestamp()});
+  }catch(e){}
+}
+function startPresence(){
+  clearInterval(beatTimer); beatTimer = null;
+  if(!user) return;
+  heartbeat();
+  beatTimer = setInterval(()=>{ if(document.visibilityState === 'visible') heartbeat(); }, 60000);
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'visible') heartbeat(); });
+function watchPeople(){
+  if(unsubPeople){ unsubPeople(); unsubPeople = null; }
+  people = [];
+  if(!isAdmin) return;
+  unsubPeople = onSnapshot(collection(db,'usuarios'), qs => {
+    people = qs.docs.map(d => ({uid:d.id, ...d.data()}));
+    renderPeople();
+  }, () => {});
+}
+const tsMs = t => t?.toMillis ? t.toMillis() : (t || 0);
+function ago(ms){
+  const m = Math.floor(ms/60000);
+  if(m < 1) return 'hace un momento';
+  if(m < 60) return `hace ${m} min`;
+  const h = Math.floor(m/60);
+  if(h < 24) return `hace ${h} h`;
+  const d = Math.floor(h/24);
+  return d === 1 ? 'hace 1 día' : `hace ${d} días`;
+}
+function fmtDate(ms){
+  if(!ms) return '—';
+  const d = new Date(ms);
+  return d.toLocaleDateString('es',{day:'numeric',month:'short'})+' '+hm(ms);
+}
+function esc(t){ const e=document.createElement('span'); e.textContent = t; return e.innerHTML; }
+function renderPeople(){
+  const box = document.getElementById('people');
+  if(!box || !isAdmin) return;
+  if(!people.length){ box.innerHTML = '<div class="empty">Todavía nadie ha iniciado sesión.</div>'; return; }
+  const now = Date.now();
+  const lastMark = {};
+  for(const e of events){ if(e.by && (!lastMark[e.by] || e.ts > lastMark[e.by].ts)) lastMark[e.by] = e; }
+  const rows = people.map(p => ({...p, seen: tsMs(p.lastSeen), first: tsMs(p.firstSeen)}))
+    .sort((a,b) => b.seen - a.seen);
+  const online = rows.filter(r => r.seen && now - r.seen < ONLINE_MS).length;
+  box.innerHTML = `<div class="day"><h3><span>${rows.length} registrados <small>· ${online} en línea</small></span></h3><div class="scroll"><table>
+    <thead><tr><th>Persona</th><th>Estado</th><th>Primera vez</th><th>Última marca</th></tr></thead>
+    <tbody>${rows.map(r => {
+      const on = r.seen && now - r.seen < ONLINE_MS;
+      const lm = lastMark[r.uid];
+      const lmTxt = lm ? `<span class="tag ${lm.l}">${lm.l}</span> ${hm(lm.ts)}` : '—';
+      return `<tr>
+        <td><div class="who-name">${esc(r.name || r.email || 'Sin nombre')}</div><div class="who-mail">${esc(r.email || '')}</div></td>
+        <td><span class="dot ${on ? 'on' : ''}"></span>${on ? 'En línea' : (r.seen ? ago(now - r.seen) : '—')}</td>
+        <td>${fmtDate(r.first)}</td>
+        <td>${lmTxt}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div></div>`;
+}
+setInterval(()=>{ if(isAdmin) renderPeople(); }, 30000);
+
 if(firebaseConfig.apiKey.startsWith('PEGA')){
   mode = 'unconfigured';
 } else {
@@ -350,6 +437,8 @@ if(firebaseConfig.apiKey.startsWith('PEGA')){
     onAuthStateChanged(auth, u => {
       user = u;
       isAdmin = !!(u?.email && ADMIN_EMAILS.map(e=>e.toLowerCase()).includes(u.email.toLowerCase()));
+      startPresence();
+      watchPeople();
       setRole(); update();
     });
     onSnapshot(doc(db,'control','estado'), s => {
